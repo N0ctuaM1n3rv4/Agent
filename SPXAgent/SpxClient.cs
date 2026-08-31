@@ -139,10 +139,29 @@ public sealed class SpxClient : IDisposable
         switch (hdr.T)
         {
             case "CMD":
-                // SKELETON: command execution not implemented yet.
                 Console.WriteLine($"[+] CMD msg={hdr.Msg} id={hdr.I}");
-                // TODO: handle command and send back a RES frame:
-                //   {T:"RES", R:hdr.I, Msg:<response type>, Body:<protojson>}
+                try
+                {
+                    var res = FsCommands.Dispatch(hdr.Msg ?? "", hdr.Body);
+                    if (res is not null)
+                    {
+                        // RES frame echoes the request id; Msg is the response type.
+                        await Frame.WriteAsync(_ssl, new SpxHeader
+                        {
+                            T = "RES",
+                            R = hdr.I,
+                            C = 0x0101,
+                            TS = Frame.NowMillis(),
+                            Msg = res.Value.Msg,
+                            Body = res.Value.Body,
+                        });
+                    }
+                    // null => command expects no response (e.g. CdReq).
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] command {hdr.Msg} failed: {ex.Message}");
+                }
                 break;
             case "DATA":
                 Console.WriteLine($"[+] DATA stream k={hdr.K} len={payload.Length}");
