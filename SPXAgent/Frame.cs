@@ -76,10 +76,10 @@ public static class Frame
             await stream.WriteAsync(payload);
     }
 
-    public static async Task<(SpxHeader Header, byte[] Payload)> ReadAsync(Stream stream)
+    public static async Task<(SpxHeader Header, byte[] Payload)> ReadAsync(Stream stream, CancellationToken ct = default)
     {
         byte[] headBuf = new byte[14];
-        await ReadExactAsync(stream, headBuf);
+        await ReadExactAsync(stream, headBuf, ct);
         uint magic = BinaryPrimitives.ReadUInt32BigEndian(headBuf.AsSpan(0, 4));
         if (magic != Magic)
             throw new InvalidDataException($"SPX bad magic 0x{magic:X8}");
@@ -94,7 +94,7 @@ public static class Frame
             throw new InvalidDataException($"SPX payload too large ({payloadLen} > {MaxPayloadLen})");
 
         byte[] headerJson = new byte[headerLen];
-        await ReadExactAsync(stream, headerJson);
+        await ReadExactAsync(stream, headerJson, ct);
 
         SpxHeader? hdr = JsonSerializer.Deserialize<SpxHeader>(headerJson, JsonOpts);
         if (hdr is null)
@@ -104,17 +104,17 @@ public static class Frame
         if (payloadLen > 0)
         {
             payload = new byte[payloadLen];
-            await ReadExactAsync(stream, payload);
+            await ReadExactAsync(stream, payload, ct);
         }
         return (hdr, payload);
     }
 
-    private static async Task ReadExactAsync(Stream stream, byte[] buf)
+    private static async Task ReadExactAsync(Stream stream, byte[] buf, CancellationToken ct = default)
     {
         int off = 0;
         while (off < buf.Length)
         {
-            int n = await stream.ReadAsync(buf.AsMemory(off));
+            int n = await stream.ReadAsync(buf.AsMemory(off), ct);
             if (n == 0)
                 throw new EndOfStreamException("SPX unexpected EOF");
             off += n;
