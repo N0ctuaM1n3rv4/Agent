@@ -205,7 +205,7 @@ typedef struct NTFS_INDEX_ENTRY {
 
 ### 4.3 各操作应改动的数据结构（对照 NTFS 规范；含已实现 / 未实现分界）
 
-> 下表：touch / mkdir / write(增长) 已实现；rm / mv / cp 仍属未实现。
+> 下表：touch / mkdir / write(增长) / rm / mv / cp 已实现。
 
 | 操作 | 本质 | 要改的结构 |
 |---|---|---|
@@ -234,11 +234,11 @@ typedef struct NTFS_INDEX_ENTRY {
 | 写：覆盖驻留 $DATA（等长/缩短） | ✅ 完整（OverwriteResidentData） |
 | 写：非驻留 / 大文件（增长） | ✅ 已实现（RebuildDataNonResident + AllocateClusters + record-6 $Bitmap） |
 | $UsnJrnl | ❌ 未实现（可选，不影响完整性） |
-| rm / mv / cp | ❌ 未实现 |
+| rm / mv / cp | ✅ 已实现（rm 非递归；大目录 rm 做整棵 B-tree 重建，旧叶子簇不回收） |
 
 ### 6.1 Agent 侧接线（当前边界）
 
-`FsCommands.cs` 用 `new NtfsFileSystem()` 构造（`NtfsFileSystem` 默认参数 `writable = false`）。读命令（Pwd/Cd/Ls/Download）正常；写命令（Upload）里 `Fs.Write` 会因卷只读在 `NtfsVolume.WriteBytes` 抛 `InvalidOperationException("volume opened read-only")`，被 `FsCommands.Upload` 的 catch 吞掉、把该文件计为 `unwriteableFiles=1`。**这不是"回退标准 API"，而是失败**。要让 agent 走原始写路径，需以 `writable: true` 打开卷（`writable=true` 时 `NtfsVolume.Open` 才加 `GENERIC_WRITE` 并 `LockVolume`）。
+`FsCommands.cs` 用 `new NtfsFileSystem()` 构造（`NtfsFileSystem` 默认参数 `writable = false`）。读命令（Pwd/Cd/Ls/Download）正常；写命令（Upload/Rm/Mkdir/Mv/Cp）里 `Fs.Write`/`Fs.Rm`/`Fs.Mv`/`Fs.Cp` 会因卷只读在 `NtfsVolume.WriteBytes` 抛 `InvalidOperationException("volume opened read-only")`，被各命令的 catch 吞掉、把该文件计为 `unwriteableFiles=1` 或 `success=false`。**这不是"回退标准 API"，而是失败**。要让 agent 走原始写路径，需以 `writable: true` 打开卷（`writable=true` 时 `NtfsVolume.Open` 才加 `GENERIC_WRITE` 并 `LockVolume`）。
 
 ## 7. 安全与测试
 

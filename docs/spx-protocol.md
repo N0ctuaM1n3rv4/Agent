@@ -95,10 +95,10 @@ agent **不主动发** PING；服务器发 `{t:"PING", i, c:0x0002}` → agent �
 | `PwdReq` | `Pwd` | 当前路径 | ✅ |
 | `DownloadReq` | `Download` | 下载文件 | ✅ |
 | `UploadReq` | `Upload` | 上传文件 | ✅ |
-| `RmReq` | `Rm` | 删除文件/目录 | ❌ |
-| `MkdirReq` | `Mkdir` | 创建目录 | ❌ |
-| `MvReq` | `Mv` | 移动/重命名 | ❌ |
-| `CpReq` | `Cp` | 复制文件 | ❌ |
+| `RmReq` | `Rm` | 删除文件/目录 | ✅ |
+| `MkdirReq` | `Mkdir` | 创建目录 | ✅ |
+| `MvReq` | `Mv` | 移动/重命名 | ✅ |
+| `CpReq` | `Cp` | 复制文件 | ✅ |
 | `ChmodReq` | `Chmod` | 修改权限 | ❌ |
 | `ChownReq` | `Chown` | 修改属主 | ❌ |
 | `ChtimesReq` | `Chtimes` | 修改时间戳 | ❌ |

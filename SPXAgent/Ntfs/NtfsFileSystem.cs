@@ -135,6 +135,293 @@ public sealed class NtfsFileSystem : IDisposable
         return true;
     }
 
+    // Remove a file or empty directory (raw NTFS). Non-recursive: directories
+    // must be empty; large directories with INDEX_ALLOCATION are rejected.
+    // Returns false if the path does not exist.
+    public bool Rm(string path)
+    {
+        string target = Normalize(path);
+        long? recNum = ResolveRecord(target);
+        if (recNum is null) return false;
+        NtfsRecord rec = NtfsRecord.Read(_vol, recNum.Value);
+
+        int idx = target.LastIndexOf('\\');
+        string dirPath = idx <= 0 ? "\\" : target[..idx];
+        string name = target[(idx + 1)..];
+        if (string.IsNullOrEmpty(name)) return false;
+
+        long? parentNum = ResolveRecord(dirPath);
+        if (parentNum is null) return false;
+        NtfsRecord parent = NtfsRecord.Read(_vol, parentNum.Value);
+        if (!parent.IsDirectory) return false;
+
+        if (rec.IsDirectory)
+        {
+            var children = NtfsIndex.Enumerate(_vol, rec);
+            if (children.Count > 0)
+                throw new IOException($"directory not empty: {target}");
+        }
+
+        // Remove the parent's index entry for this child.
+        NtfsWriter.RemoveIndexEntry(_vol, parent, name);
+
+        // Free non-resident clusters (skip INDEX_ALLOCATION; large dirs rejected above).
+        foreach (NtfsAttribute attr in rec.Attributes())
+        {
+            if (!attr.NonResident) continue;
+            if (attr.Type == NtfsRecord.AttrIndexAllocation) continue;
+            NtfsWriter.FreeClusters(_vol, attr.Runlist());
+        }
+
+        // Clear the in-use flag and mark the MFT record free.
+        byte[] raw = rec.Raw;
+        ushort flags = (ushort)(ReadU16(raw, 0x16) & ~0x0001);
+        WriteU16(raw, 0x16, flags);
+        byte[] fixedRecord = NtfsWriter.ApplyFixup(_vol, raw);
+        _vol.WriteBytes(_vol.MftOffset + recNum.Value * _vol.RecordSize, fixedRecord);
+        NtfsWriter.SetMftRecordBit(_vol, recNum.Value, inUse: false);
+
+        TouchDirMtime(parentNum.Value);
+        return true;
+    }
+
+    // Move or rename a file/directory. Same-directory rename only changes the
+    // FILE_NAME key; cross-directory moves also update the parent reference.
+    // Returns false if src does not exist or dst already exists.
+    public bool Mv(string src, string dst)
+    {
+        string srcNorm = Normalize(src);
+        string dstNorm = Normalize(dst);
+        if (srcNorm == dstNorm) return false;
+        if (ResolveRecord(dstNorm) is not null) return false;
+
+        long? srcRecNum = ResolveRecord(srcNorm);
+        if (srcRecNum is null) return false;
+        NtfsRecord srcRec = NtfsRecord.Read(_vol, srcRecNum.Value);
+
+        int srcIdx = srcNorm.LastIndexOf('\\');
+        string srcDirPath = srcIdx <= 0 ? "\\" : srcNorm[..srcIdx];
+        string srcName = srcNorm[(srcIdx + 1)..];
+        int dstIdx = dstNorm.LastIndexOf('\\');
+        string dstDirPath = dstIdx <= 0 ? "\\" : dstNorm[..dstIdx];
+        string dstName = dstNorm[(dstIdx + 1)..];
+        if (string.IsNullOrEmpty(srcName) || string.IsNullOrEmpty(dstName)) return false;
+
+        long? srcParentNum = ResolveRecord(srcDirPath);
+        if (srcParentNum is null) return false;
+        NtfsRecord srcParent = NtfsRecord.Read(_vol, srcParentNum.Value);
+        if (!srcParent.IsDirectory) return false;
+
+        long dataSize = 0;
+        NtfsAttribute? dataAttr = srcRec.FindAttribute(NtfsRecord.AttrData);
+        if (dataAttr is not null) dataSize = dataAttr.DataSize;
+
+        if (string.Equals(srcDirPath, dstDirPath, StringComparison.Ordinal))
+        {
+            // Same-directory rename: update FILE_NAME name + timestamps, then
+            // remove the old index entry and insert the new one.
+            UpdateFileName(srcRec, dstName, srcParent.SequenceNumber, srcParentNum.Value, dataSize);
+            NtfsWriter.RemoveIndexEntry(_vol, srcParent, srcName);
+            // RemoveIndexEntry rewrote the parent record; re-read before inserting.
+            NtfsRecord freshParent = NtfsRecord.Read(_vol, srcParentNum.Value);
+            NtfsWriter.InsertIndexEntry(_vol, freshParent, srcRecNum.Value, dstName, dataSize);
+            TouchDirMtime(srcParentNum.Value);
+            return true;
+        }
+
+        // Cross-directory move.
+        long? dstParentNum = ResolveRecord(dstDirPath);
+        if (dstParentNum is null) return false;
+        NtfsRecord dstParent = NtfsRecord.Read(_vol, dstParentNum.Value);
+        if (!dstParent.IsDirectory) return false;
+
+        UpdateFileName(srcRec, dstName, dstParent.SequenceNumber, dstParentNum.Value, dataSize);
+        NtfsWriter.RemoveIndexEntry(_vol, srcParent, srcName);
+        // RemoveIndexEntry rewrote srcParent; re-read dstParent unchanged, but
+        // srcParent is stale — no further use. dstParent is fresh for insert.
+        NtfsWriter.InsertIndexEntry(_vol, dstParent, srcRecNum.Value, dstName, dataSize);
+        TouchDirMtime(srcParentNum.Value);
+        TouchDirMtime(dstParentNum.Value);
+        return true;
+    }
+
+    // Copy a file or recursively copy a directory. Returns false if src does
+    // not exist or dst already exists.
+    public bool Cp(string src, string dst)
+    {
+        string srcNorm = Normalize(src);
+        string dstNorm = Normalize(dst);
+        long? srcRecNum = ResolveRecord(srcNorm);
+        if (srcRecNum is null) return false;
+        if (ResolveRecord(dstNorm) is not null) return false;
+
+        NtfsRecord srcRec = NtfsRecord.Read(_vol, srcRecNum.Value);
+        if (srcRec.IsDirectory)
+        {
+            if (!MkDir(dstNorm)) return false;
+            foreach (NtfsEntry child in Ls(srcNorm))
+            {
+                if (child.Name is "." or "..") continue;
+                string childSrc = srcNorm == "\\" ? "\\" + child.Name : srcNorm + "\\" + child.Name;
+                string childDst = dstNorm == "\\" ? "\\" + child.Name : dstNorm + "\\" + child.Name;
+                if (!Cp(childSrc, childDst)) return false;
+            }
+            return true;
+        }
+
+        byte[] data = Cat(srcNorm);
+        Write(dstNorm, data, overwrite: false);
+        return true;
+    }
+
+    // Rewrite a record's $FILE_NAME attribute in place: parent reference,
+    // name, and timestamps. If the new name is longer than the old one, the
+    // attribute is rebuilt (resident) and the record is rewritten.
+    private void UpdateFileName(NtfsRecord rec, string newName, ushort parentSeq, long parentNum, long dataSize)
+    {
+        NtfsAttribute? fnAttr = rec.FindAttribute(NtfsRecord.AttrFileName);
+        if (fnAttr is null) throw new IOException("record has no $FILE_NAME attribute");
+        if (fnAttr.NonResident) throw new NotSupportedException("$FILE_NAME is non-resident");
+
+        (int valueOffset, int valueLen) = fnAttr.ResidentValueLocation();
+        if (valueLen < 0x42) throw new InvalidDataException("$FILE_NAME too short");
+
+        byte[] record = (byte[])rec.Raw.Clone();
+        long nowFileTime = DateTimeOffset.UtcNow.ToFileTime();
+
+        // Parent reference: 48-bit record number | 16-bit sequence.
+        ulong parentRef = ((ulong)parentSeq << 48) | (ulong)parentNum;
+
+        int oldNameLen = record[valueOffset + 0x40];
+        int newNameLen = newName.Length;
+        int newValueLen = 0x42 + newNameLen * 2;
+        newValueLen = (newValueLen + 7) & ~7; // align 8
+
+        if (newValueLen <= valueLen)
+        {
+            // Same or shorter: overwrite in place.
+            WriteU64(record, valueOffset, parentRef);
+            WriteU64(record, valueOffset + 8, (ulong)nowFileTime);
+            WriteU64(record, valueOffset + 0x10, (ulong)nowFileTime);
+            WriteU64(record, valueOffset + 0x18, (ulong)nowFileTime);
+            WriteU64(record, valueOffset + 0x20, (ulong)nowFileTime);
+            WriteU64(record, valueOffset + 0x28, (ulong)dataSize);
+            WriteU64(record, valueOffset + 0x30, (ulong)dataSize);
+
+            record[valueOffset + 0x40] = (byte)newNameLen;
+            for (int i = 0; i < newNameLen; i++)
+                WriteU16(record, valueOffset + 0x42 + i * 2, newName[i]);
+            for (int i = newNameLen; i < oldNameLen; i++)
+                WriteU16(record, valueOffset + 0x42 + i * 2, 0);
+
+            byte[] fixedRecord = NtfsWriter.ApplyFixup(_vol, record);
+            _vol.WriteBytes(_vol.MftOffset + rec.MftRecordNumber * _vol.RecordSize, fixedRecord);
+            return;
+        }
+
+        // Longer name: rebuild the $FILE_NAME attribute with a larger value.
+        // The attribute is resident; we need to rebuild the entire record.
+        byte[] newFnValue = new byte[newValueLen];
+        Array.Copy(record, valueOffset, newFnValue, 0, Math.Min(valueLen, newValueLen));
+        WriteU64(newFnValue, 0, parentRef);
+        WriteU64(newFnValue, 8, (ulong)nowFileTime);
+        WriteU64(newFnValue, 0x10, (ulong)nowFileTime);
+        WriteU64(newFnValue, 0x18, (ulong)nowFileTime);
+        WriteU64(newFnValue, 0x20, (ulong)nowFileTime);
+        WriteU64(newFnValue, 0x28, (ulong)dataSize);
+        WriteU64(newFnValue, 0x30, (ulong)dataSize);
+        newFnValue[0x40] = (byte)newNameLen;
+        for (int i = 0; i < newNameLen; i++)
+            WriteU16(newFnValue, 0x42 + i * 2, newName[i]);
+
+        // Rebuild the record: copy all attributes except $FILE_NAME, then
+        // insert the new $FILE_NAME with updated value.
+        int firstAttr = rec.FirstAttrOffset;
+        if (firstAttr <= 0 || firstAttr >= record.Length)
+            throw new InvalidDataException("bad first-attribute offset");
+
+        var preserved = new List<(uint Type, string? Name, byte[] Raw)>();
+        int off = firstAttr;
+        while (off + 8 <= rec.UsedSize)
+        {
+            uint type = (uint)(record[off] | (record[off + 1] << 8) | (record[off + 2] << 16) | (record[off + 3] << 24));
+            if (type == 0xFFFFFFFF || type == 0) break;
+            uint len = (uint)(record[off + 4] | (record[off + 5] << 8) | (record[off + 6] << 16) | (record[off + 7] << 24));
+            if (len < 16 || off + (int)len > record.Length) break;
+            if (type != NtfsRecord.AttrFileName)
+            {
+                int nameLen2 = record[off + 9];
+                int nameOff2 = off + (record[off + 10] | (record[off + 11] << 8));
+                string? attrName = null;
+                if (nameLen2 > 0 && nameOff2 + nameLen2 * 2 <= record.Length)
+                    attrName = System.Text.Encoding.Unicode.GetString(record, nameOff2, nameLen2 * 2);
+                byte[] bytes = new byte[len];
+                Array.Copy(record, off, bytes, 0, (int)len);
+                preserved.Add((type, attrName, bytes));
+            }
+            off += (int)len;
+        }
+
+        // Build new $FILE_NAME attribute.
+        int fnHeaderLen = 0x18;
+        int fnTotal = fnHeaderLen + newValueLen;
+        fnTotal = (fnTotal + 7) & ~7;
+        byte[] fnAttrBytes = new byte[fnTotal];
+        fnAttrBytes[0] = 0x30; // type
+        fnAttrBytes[4] = (byte)fnTotal;
+        fnAttrBytes[5] = (byte)(fnTotal >> 8);
+        fnAttrBytes[8] = 0; // resident
+        fnAttrBytes[9] = 0; // name length
+        fnAttrBytes[14] = 0; // attr id (will be overwritten)
+        fnAttrBytes[15] = 0;
+        fnAttrBytes[16] = (byte)newValueLen;
+        fnAttrBytes[17] = (byte)(newValueLen >> 8);
+        fnAttrBytes[18] = (byte)(newValueLen >> 16);
+        fnAttrBytes[19] = (byte)(newValueLen >> 24);
+        fnAttrBytes[20] = (byte)fnHeaderLen;
+        fnAttrBytes[21] = (byte)(fnHeaderLen >> 8);
+        fnAttrBytes[22] = 1; // indexed
+        newFnValue.CopyTo(fnAttrBytes, fnHeaderLen);
+
+        // Assemble rebuilt record.
+        var all = preserved.Concat(new[] { (NtfsRecord.AttrFileName, (string?)null, fnAttrBytes) })
+            .OrderBy(a => a.Item1)
+            .ThenBy(a => a.Item2, StringComparer.Ordinal)
+            .ToList();
+
+        byte[] rec2 = new byte[_vol.RecordSize];
+        Array.Copy(record, 0, rec2, 0, firstAttr);
+
+        int attrOff = firstAttr;
+        ushort nextId = 0;
+        foreach (var attr in all)
+        {
+            byte[] bytes = attr.Item3;
+            if (bytes.Length % 8 != 0)
+            {
+                int aligned = (bytes.Length + 7) & ~7;
+                Array.Resize(ref bytes, aligned);
+            }
+            if (attrOff + bytes.Length + 4 > rec2.Length)
+                throw new NotSupportedException("record overflow rebuilding $FILE_NAME");
+
+            bytes[14] = (byte)nextId;
+            bytes[15] = (byte)(nextId >> 8);
+            bytes.CopyTo(rec2, attrOff);
+            attrOff += bytes.Length;
+            nextId++;
+        }
+
+        int usedSize = (attrOff + 8 + 7) & ~7;
+        WriteU32(rec2, attrOff, 0xFFFFFFFF);
+        WriteU32(rec2, attrOff + 4, 0);
+        WriteU16(rec2, 0x28, nextId); // FhNextAttrId
+        WriteU32(rec2, 0x18, (uint)usedSize); // FhUsedSize
+
+        byte[] fixedRecord2 = NtfsWriter.ApplyFixup(_vol, rec2);
+        _vol.WriteBytes(_vol.MftOffset + rec.MftRecordNumber * _vol.RecordSize, fixedRecord2);
+    }
+
     private void EnsureParentDirs(string target)
     {
         // Build each missing ancestor directory under the root.
@@ -342,6 +629,28 @@ public sealed class NtfsFileSystem : IDisposable
         // NTFS has no POSIX mode bits; synthesize from directory/file state.
         string perms = e.IsDir ? "drwxr-xr-x" : "-rw-rw-rw-";
         return perms;
+    }
+
+    private static ushort ReadU16(byte[] b, int off) =>
+        (ushort)(b[off] | (b[off + 1] << 8));
+
+    private static void WriteU16(byte[] b, int off, int v)
+    {
+        b[off] = (byte)v;
+        b[off + 1] = (byte)(v >> 8);
+    }
+
+    private static void WriteU32(byte[] b, int off, uint v)
+    {
+        b[off] = (byte)v;
+        b[off + 1] = (byte)(v >> 8);
+        b[off + 2] = (byte)(v >> 16);
+        b[off + 3] = (byte)(v >> 24);
+    }
+
+    private static void WriteU64(byte[] b, int off, ulong v)
+    {
+        for (int i = 0; i < 8; i++) b[off + i] = (byte)(v >> (8 * i));
     }
 
     private static long CapToLines(NtfsAttribute data, long start, long maxLines)

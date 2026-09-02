@@ -53,7 +53,7 @@ loop:
 - `PING` (frame type) → reply `PONG` echoing `i` (kept for protocol completeness; the agent never sends PING).
 - `CMD` (session) / `TASK` (beacon) → `CoreCommands.Dispatch` first, then `FsCommands.Dispatch`:
   - `CoreCommands` handles `Ping` (echo body verbatim) and `KillReq` (returns an exit flag → `HandleServerFrameAsync` returns `false` → the read loop breaks; beacon mode propagates this out of the reconnect loop).
-  - `FsCommands` handles `PwdReq`/`CdReq`/`LsReq`/`DownloadReq`/`UploadReq`.
+  - `FsCommands` handles `PwdReq`/`CdReq`/`LsReq`/`DownloadReq`/`UploadReq`/`RmReq`/`MkdirReq`/`MvReq`/`CpReq`.
   - Replies: `RES` (`c=0x0101`) for session CMD, `TASK_RES` (`c=0x0201`, `s=beaconId`) for beacon TASK, with `r` = request `i`.
   - Beacon tasks that produce no response (e.g. `CdReq`) still send a completion `TASK_RES` (msg = request type, body `{}`) so the server marks the task done.
   - Command exceptions are logged, not fatal.
@@ -62,7 +62,7 @@ loop:
 ### Filesystem layer (`FsCommands` → `NtfsFileSystem` → `NtfsVolume`)
 
 - `FsCommands` is a static facade over a single shared `NtfsFileSystem Fs = new()` (opened **read-only**, first NTFS fixed volume or `C:`). It maps protojson request fields to `NtfsFileSystem` calls and serializes responses back to protojson (lowerCamelCase, `bytes` as base64, gzip for transfer).
-- `NtfsFileSystem` is the public FS API: `Pwd`/`Cd`/`Ls`/`Cat` (read path) and `Write`/`MkDir` (write path). Read path is complete and verified; write path builds new MFT records, `FILE_NAME`/`DATA` attributes and directory index entries.
+- `NtfsFileSystem` is the public FS API: `Pwd`/`Cd`/`Ls`/`Cat` (read path) and `Write`/`MkDir`/`Rm`/`Mv`/`Cp` (write path). Read path is complete and verified; write path builds new MFT records, `FILE_NAME`/`DATA` attributes and directory index entries.
 - `NtfsVolume` owns the `CreateFile` handle on the volume device (`\\.\X:`), sector-aligned raw reads, read-modify-write sector writes, and the `FSCTL_LOCK_VOLUME` / `FSCTL_UNLOCK_VOLUME` lifecycle required to raw-write a mounted volume.
 
 ### Module graph
@@ -157,17 +157,17 @@ Program
 - **C2/protocol verification** is by building (`dotnet build agents.sln`) and running against a server:
   - Session: `dotnet run --project SPXAgent -- <host> <port>`; success is `[+] AUTH OK` → `[+] registered session: <id>` → correct `RES` replies to CMD frames (`Ping` echo, `LsReq`, …), and clean exit on `KillReq`.
   - Beacon: `dotnet run --project SPXAgent -- <host> <port> beacon <intervalSec> <jitterPercent>`; success is a repeating connect → `[+] registered beacon: <id>` → check-in cycle, `TASK_RES` replies for queued tasks, and clean exit on `KillReq`.
-- **NTFS write-path verification** is via `NtfsVerify` (`dotnet run --project NtfsVerify`), which exercises resident write, 2 MB non-resident write, and 60-file multi-block index spill against a **mounted isolated NTFS volume (e.g. `Z:`)**, with SHA-256/byte-equality self-consistency checks. It is a manual harness, not a unit-test suite.
-- **Do not run the write path against a real system/data volume (`C:`/`D:`/etc.).** Per `docs/ntfs-filesystem.md`, the write path omits several consistency structures (`$MFT::$BITMAP`, `$Bitmap`, `$LogFile`, `$UsnJrnl`, parent `$SI` mtime), so even an isolated volume may be flagged dirty by Windows after a write. Test only on a detached, disposable VHD and remove it afterward.
+- **NTFS write-path verification** is via `NtfsVerify` (`dotnet run --project NtfsVerify`), which exercises resident write, 2 MB non-resident write, 60-file multi-block index spill, rm, mv (same-dir + cross-dir), and cp against a **mounted isolated NTFS volume (e.g. `Z:`)**, with SHA-256/byte-equality self-consistency checks. It is a manual harness, not a unit-test suite.
+- **Do not run the write path against a real system/data volume (`C:`/`D:`/etc.).** Per `docs/ntfs-filesystem.md`, the write path omits several consistency structures (`$MFT::$BITMAP`, `$Bitmap`, `$LogFile`, `$UsnJrnl`, parent `$SI` mtime), so even an isolated volume may be flagged dirty by Windows after a write. `rm` on large directories rebuilds the entire B-tree and orphans old leaf clusters (does not free them). Test only on a detached, disposable VHD and remove it afterward.
 - If you add tests, create a new test project (e.g. `SPXAgent.Tests`, xUnit) and reference the agent project; none exists to extend today.
 
 ## Known Gotchas (from source review)
 
 1. **TLS certificate is accept-all**: `SpxClient.ValidateServerCertificate` returns `true` unconditionally (skeleton). TODO: pin server cert / mTLS CA.
-2. **Live agent FS layer is read-only**: `FsCommands` constructs `new NtfsFileSystem()` (writable=false). The write methods (`Write`/`MkDir`) therefore throw `InvalidOperationException("volume opened read-only")` at runtime in the agent; `FsCommands.Upload` catches it and reports `unwriteableFiles`. The write path itself works (proven by `NtfsVerify`, which opens `writable: true`), but it is **not enabled in the live agent**. Enabling it requires opening the volume writable (and thus locking it), which the agent currently never does.
+2. **Live agent FS layer is read-only**: `FsCommands` constructs `new NtfsFileSystem()` (writable=false). The write methods (`Write`/`MkDir`/`Rm`/`Mv`/`Cp`) therefore throw `InvalidOperationException("volume opened read-only")` at runtime in the agent; `FsCommands.Upload` catches it and reports `unwriteableFiles`. The write path itself works (proven by `NtfsVerify`, which opens `writable: true`), but it is **not enabled in the live agent**. Enabling it requires opening the volume writable (and thus locking it), which the agent currently never does.
 3. **`SpxHeader` field names are the wire contract**: single-letter `[JsonPropertyName]` mapping must stay in sync with the Go server (`server/c2/spx.go`); renaming breaks wire compatibility silently. Authoritative reference: `docs/spx-protocol.md`.
 4. **Frame flags byte is hard-coded to 0** in `Frame.WriteAsync` even though the format defines 0x01=compressed / 0x02=close / 0x04=stream-cont.
 5. **Identity is ephemeral**: without `SPX_AGENT_KEY`, a fresh keypair is generated each run, so the pubkey must be re-added to `server.yaml` `spx.authorized_keys` every run. Beacon identity is similarly ephemeral unless `SPX_BEACON_ID` is set.
 6. **NTFS write path is not consistency-complete**: it omits `$MFT::$BITMAP`, `$Bitmap`, `$LogFile`, `$UsnJrnl` updates (see `docs/ntfs-filesystem.md` §4.1). Raw writes can leave a mounted volume dirty; treat the write path as experimental and isolated-volume-only.
 7. **`NtfsVerify` is not in `agents.sln`**: a bare `dotnet build agents.sln` does not build it; reference the project directly (`dotnet build NtfsVerify`).
-8. **Command surface is intentionally narrow**: `Ping`, `KillReq`, and the FS set (`PwdReq`/`CdReq`/`LsReq`/`DownloadReq`/`UploadReq`) are implemented. `ExecuteReq`/`PsReq`/`ShellReq` (process spawn, process list, interactive shell) are deliberately **not** implemented — additional execution capability is planned to go through in-memory .NET assembly loading (`Assembly.Load` into a collectible `AssemblyLoadContext`), not process spawning. In session mode unknown messages fall through to the no-response path; in beacon mode they get a completion `TASK_RES`.
+8. **Command surface is intentionally narrow**: `Ping`, `KillReq`, and the FS set (`PwdReq`/`CdReq`/`LsReq`/`DownloadReq`/`UploadReq`/`RmReq`/`MkdirReq`/`MvReq`/`CpReq`) are implemented. `ExecuteReq`/`PsReq`/`ShellReq` (process spawn, process list, interactive shell) are deliberately **not** implemented — additional execution capability is planned to go through in-memory .NET assembly loading (`Assembly.Load` into a collectible `AssemblyLoadContext`), not process spawning. In session mode unknown messages fall through to the no-response path; in beacon mode they get a completion `TASK_RES`.

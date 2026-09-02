@@ -396,6 +396,116 @@ internal static class NtfsWriter
         return c != 0 ? c : string.Compare(a, b, StringComparison.Ordinal);
     }
 
+    // Remove an index entry from a directory's index. For small indices
+    // (INDEX_ROOT only) the root is rebuilt in place. For large indices
+    // (INDEX_ALLOCATION present) the entire B-tree is rebuilt: all remaining
+    // entries are collected, then redistributed across leaf blocks with new
+    // separators. The old leaf clusters are orphaned (not freed) — this is a
+    // deliberate simplification vs ntfs-3g ntfs_index_rm_leaf.
+    public static void RemoveIndexEntry(NtfsVolume vol, NtfsRecord dir, string name)
+    {
+        var entries = NtfsIndex.CollectRawEntries(vol, dir);
+        int idx = entries.FindIndex(e => CompareNames(e.Name, name) == 0);
+        if (idx < 0) throw new IOException($"not found in index: {name}");
+        entries.RemoveAt(idx);
+
+        bool hasAllocation = dir.FindAttribute(NtfsRecord.AttrIndexAllocation) is { NonResident: true };
+
+        if (!hasAllocation)
+        {
+            // Small index: rebuild INDEX_ROOT resident.
+            var rootEntries = new List<byte[]>();
+            foreach ((_, byte[] raw) in entries) rootEntries.Add(raw);
+            rootEntries.Add(Terminator(16));
+            byte[] rootValue = BuildIndexRootValue(vol, rootEntries, large: false);
+            if (!TryRebuildDirRecord(vol, dir, rootValue, null, null, out byte[]? record))
+                throw new NotSupportedException("directory record overflow on index removal");
+            WriteRecord(vol, dir.MftRecordNumber, record!);
+            return;
+        }
+
+        // Large index: full tree rebuild.
+        if (entries.Count == 0)
+        {
+            // No entries left: revert to small index (terminator only).
+            var emptyRoot = new List<byte[]> { Terminator(16) };
+            byte[] emptyValue = BuildIndexRootValue(vol, emptyRoot, large: false);
+            if (!TryRebuildDirRecord(vol, dir, emptyValue, null, null, out byte[]? emptyRecord))
+                throw new NotSupportedException("directory record overflow on empty index rebuild");
+            WriteRecord(vol, dir.MftRecordNumber, emptyRecord!);
+            return;
+        }
+
+        // Sort entries by name (they should already be sorted, but ensure).
+        entries.Sort((a, b) => CompareNames(a.Name, b.Name));
+
+        int blockSize = vol.IndexBlockSize;
+        int entriesOffset = 0x28; // INDEX_HEADER relative offset in INDX block
+        int usablePerBlock = blockSize - entriesOffset - 16; // minus terminator
+
+        // Distribute entries into leaf blocks, one block at a time.
+        var leaves = new List<List<byte[]>>();
+        var currentLeaf = new List<byte[]>();
+        int currentSize = 0;
+        foreach ((string entryName, byte[] raw) in entries)
+        {
+            if (currentSize + raw.Length > usablePerBlock && currentLeaf.Count > 0)
+            {
+                leaves.Add(currentLeaf);
+                currentLeaf = new List<byte[]>();
+                currentSize = 0;
+            }
+            currentLeaf.Add(raw);
+            currentSize += raw.Length;
+        }
+        if (currentLeaf.Count > 0) leaves.Add(currentLeaf);
+
+        // Allocate clusters for all leaves.
+        long totalClusters = leaves.Count;
+        List<(long Lcn, long Length)> runs = AllocateClusters(vol, totalClusters);
+        long[] lcns = new long[leaves.Count];
+        int li = 0;
+        foreach ((long lcn, long len) in runs)
+            for (int i = 0; i < len; i++) lcns[li++] = lcn + i;
+
+        // Write leaf blocks.
+        for (int i = 0; i < leaves.Count; i++)
+        {
+            byte[] block = BuildIndxBlock(vol, i, leaves[i]);
+            vol.WriteBytes(lcns[i] * vol.ClusterSize, ApplyFixup(vol, block));
+        }
+
+        // Build root separators: for leaves 0..N-2, separator = last entry of
+        // that leaf with sub-node VCN pointing at it. Terminator points at last leaf.
+        var rootEntries2 = new List<byte[]>();
+        for (int i = 0; i < leaves.Count - 1; i++)
+        {
+            byte[] lastEntry = leaves[i][^1];
+            byte[] sep = AddSubnode(lastEntry, (ulong)i);
+            rootEntries2.Add(sep);
+        }
+        byte[] term = new byte[24];
+        WriteU16(term, 8, 24);
+        term[12] = 0x02 | 0x01; // last + sub-node
+        WriteU64(term, 16, (ulong)(leaves.Count - 1));
+        rootEntries2.Add(term);
+        byte[] rootValue2 = BuildIndexRootValue(vol, rootEntries2, large: true);
+
+        // Rebuild dir record with new INDEX_ALLOCATION runlist and BITMAP.
+        byte[] runlist = EncodeRunlist(runs);
+        long dataSize = (long)leaves.Count * blockSize;
+        byte[] newAlloc = BuildNonResidentAttrBytes(vol, NtfsRecord.AttrIndexAllocation, 0, "$I30",
+            0, totalClusters - 1, dataSize, dataSize, runlist);
+        byte[] bits = new byte[8];
+        for (int i = 0; i < leaves.Count; i++)
+            bits[i / 8] |= (byte)(1 << (i % 8));
+        byte[] newBitmap = BuildResidentAttrBytes(NtfsRecord.AttrBitmap, 0, "$I30", bits);
+
+        if (!TryRebuildDirRecord(vol, dir, rootValue2, newAlloc, newBitmap, out byte[]? record2))
+            throw new NotSupportedException("directory record overflow on tree rebuild");
+        WriteRecord(vol, dir.MftRecordNumber, record2!);
+    }
+
     // First spill (ntfs-3g ntfs_ir_reparent): move every resident entry into a
     // single INDX leaf block (vcn 0), leaving the INDEX_ROOT with only a
     // NODE+END terminator pointing at it. Adds INDEX_ALLOCATION + BITMAP($I30).
@@ -1023,6 +1133,21 @@ internal static class NtfsWriter
 
     private static bool IsClusterUsed(byte[] bitmap, long lcn) =>
         ((bitmap[lcn / 8] >> (int)(lcn % 8)) & 1) != 0;
+
+    // Free clusters by clearing their bits in the volume $Bitmap and persisting
+    // the updated bitmap. Counterpart to AllocateClusters.
+    public static void FreeClusters(NtfsVolume vol, IEnumerable<(long Lcn, long Length)> runs)
+    {
+        NtfsRecord bmpRec = NtfsRecord.Read(vol, 6);
+        NtfsAttribute? bmpAttr = bmpRec.FindAttribute(NtfsRecord.AttrData);
+        if (bmpAttr is null) throw new NotSupportedException("$Bitmap has no $DATA; raw free unsupported");
+        byte[] bitmap = bmpAttr.NonResident ? bmpAttr.ReadValue(vol) : bmpAttr.ResidentValue().ToArray();
+
+        foreach ((long lcn, long len) in runs)
+            for (long i = lcn; i < lcn + len; i++) SetClusterBit(bitmap, i, used: false);
+
+        WriteBitmapBytes(vol, bmpRec, bmpAttr, bitmap);
+    }
 
     private static void SetClusterBit(byte[] bitmap, long lcn, bool used)
     {

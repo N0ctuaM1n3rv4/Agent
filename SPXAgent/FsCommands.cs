@@ -28,6 +28,10 @@ public static class FsCommands
             "LsReq" => Ls(body),
             "DownloadReq" => Download(body),
             "UploadReq" => Upload(body),
+            "RmReq" => Rm(body),
+            "MkdirReq" => Mkdir(body),
+            "MvReq" => Mv(body),
+            "CpReq" => Cp(body),
             _ => null,
         };
     }
@@ -194,6 +198,98 @@ public static class FsCommands
             ["unwriteableFiles"] = unwriteable,
         };
         return ("Upload", JsonSerializer.SerializeToElement(payload, JsonOpts));
+    }
+
+    private static (string, JsonElement)? Rm(JsonElement? body)
+    {
+        string path = GetString(body, "path") ?? "";
+        bool success = false;
+        string? err = null;
+        try
+        {
+            success = Fs.Rm(path);
+        }
+        catch (Exception ex)
+        {
+            err = ex.Message;
+        }
+        var payload = new Dictionary<string, object>
+        {
+            ["path"] = path,
+            ["success"] = success,
+        };
+        if (err is not null) payload["response"] = new Dictionary<string, object> { ["err"] = err };
+        return ("Rm", JsonSerializer.SerializeToElement(payload, JsonOpts));
+    }
+
+    private static (string, JsonElement)? Mkdir(JsonElement? body)
+    {
+        string path = GetString(body, "path") ?? "";
+        bool success = false;
+        string? err = null;
+        try
+        {
+            success = Fs.MkDir(path);
+        }
+        catch (Exception ex)
+        {
+            err = ex.Message;
+        }
+        var payload = new Dictionary<string, object>
+        {
+            ["path"] = path,
+            ["success"] = success,
+        };
+        if (err is not null) payload["response"] = new Dictionary<string, object> { ["err"] = err };
+        return ("Mkdir", JsonSerializer.SerializeToElement(payload, JsonOpts));
+    }
+
+    private static (string, JsonElement)? Mv(JsonElement? body)
+    {
+        string oldPath = GetString(body, "oldPath") ?? "";
+        string newPath = GetString(body, "newPath") ?? "";
+        bool success = false;
+        string? err = null;
+        try
+        {
+            success = Fs.Mv(oldPath, newPath);
+        }
+        catch (Exception ex)
+        {
+            err = ex.Message;
+        }
+        var payload = new Dictionary<string, object>
+        {
+            ["oldPath"] = oldPath,
+            ["newPath"] = newPath,
+            ["success"] = success,
+        };
+        if (err is not null) payload["response"] = new Dictionary<string, object> { ["err"] = err };
+        return ("Mv", JsonSerializer.SerializeToElement(payload, JsonOpts));
+    }
+
+    private static (string, JsonElement)? Cp(JsonElement? body)
+    {
+        string oldPath = GetString(body, "oldPath") ?? "";
+        string newPath = GetString(body, "newPath") ?? "";
+        bool success = false;
+        string? err = null;
+        try
+        {
+            success = Fs.Cp(oldPath, newPath);
+        }
+        catch (Exception ex)
+        {
+            err = ex.Message;
+        }
+        var payload = new Dictionary<string, object>
+        {
+            ["oldPath"] = oldPath,
+            ["newPath"] = newPath,
+            ["success"] = success,
+        };
+        if (err is not null) payload["response"] = new Dictionary<string, object> { ["err"] = err };
+        return ("Cp", JsonSerializer.SerializeToElement(payload, JsonOpts));
     }
 
     // ---------- helpers ----------
