@@ -3,9 +3,9 @@ using System.Text;
 namespace SpxAgent.Ntfs;
 
 // Builder + low-level writer for raw NTFS MFT records and directory index
-// entries. Only resident data is supported (data stored inside the record);
-// non-resident (cluster-allocated) writes are rejected with NotSupportedException
-// and callers fall back per the plan.
+// entries. Resident data is stored inside the record; writes that outgrow the
+// resident capacity (or already-non-resident data) are rebuilt as non-resident
+// via RebuildDataNonResident (AllocateClusters allocates fresh cluster runs).
 internal static class NtfsWriter
 {
     // Custom delegate: ref structs (Span<byte>) cannot be generic args, so a
@@ -1114,34 +1114,6 @@ internal static class NtfsWriter
 
 
     // ---- helpers ----
-    // Read the current LSN from $LogFile's restart area. New FILE records must
-    // carry an LSN within the log's valid window or chkdsk rejects them as
-    // corrupt. Layout (see $LogFile restart area spec):
-    //   page 0: "RSTR" header; restart record at offset restart_offset (0x30);
-    //   current_lsn at restart record +0x08.
-    private static long ReadCurrentLogLsn(NtfsVolume vol)
-    {
-        try
-        {
-            NtfsRecord logFile = NtfsRecord.Read(vol, 2); // $LogFile
-            NtfsAttribute? data = logFile.FindAttribute(NtfsRecord.AttrData);
-            if (data is null) return 0;
-            byte[] page0 = data.ReadValue(vol, 0, 4096);
-            if (page0.Length < 0x40 || Encoding.ASCII.GetString(page0, 0, 4) != "RSTR")
-                return 0;
-            int restartOffset = page0[0x18] | (page0[0x19] << 8); // u16 @ 0x18
-            // current_lsn is the first field of RESTART_AREA (8 bytes @ +0x00)
-            long currentLsn = 0;
-            for (int i = 0; i < 8; i++)
-                currentLsn |= (long)page0[restartOffset + i] << (8 * i);
-            return currentLsn;
-        }
-        catch
-        {
-            return 0;
-        }
-    }
-
     private static ushort ReadU16(byte[] b, int off) => (ushort)(b[off] | (b[off + 1] << 8));
     private static uint ReadU32(byte[] b, int off) =>
         (uint)(b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24));
