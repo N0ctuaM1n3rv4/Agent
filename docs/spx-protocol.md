@@ -95,7 +95,7 @@ agent **不主动发** PING；服务器发 `{t:"PING", i, c:0x0002}` → agent �
 | `PwdReq` | `Pwd` | 当前路径 | ✅ |
 | `DownloadReq` | `Download` | 下载文件 | ✅ |
 | `UploadReq` | `Upload` | 上传文件 | ✅ |
-| `ExecuteReq` | `Execute` | 执行程序 | ❌（走程序集 JIT 替代） |
+| `ExecuteReq` | `Execute` | 内存程序集执行 | ❌（走程序集 JIT 替代） |
 | `PsReq` | `Ps` | 进程列表 | ❌ |
 | `ShellReq` | —(走 OPEN/DATA) | 交互 shell | ❌ |
 | `KillReq` | —(空) | 结束会话 | ✅ |
