@@ -22,6 +22,7 @@ public static class FsCommands
     private static NtfsFileSystem? _fs;
     private static NtfsFileSystem Fs => _fs ??= new NtfsFileSystem();
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public static (string Msg, JsonElement Body)? Dispatch(string msg, JsonElement? body)
     {
         return msg switch

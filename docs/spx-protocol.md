@@ -108,7 +108,7 @@ agent **不主动发** PING；服务器发 `{t:"PING", i, c:0x0002}` → agent �
 | `ProcessDumpReq` | `ProcessDump` | 进程转储 | ❌ |
 | `ExecuteReq` | `Execute` | 执行程序 | ❌（走程序集 JIT 替代） |
 | `ExecuteWindowsReq` | `Execute` | Windows 执行 | ❌ |
-| `ExecuteAssemblyReq` | `ExecuteAssembly` | 执行 .NET 程序集 | ❌ |
+| `ExecuteAssemblyReq` | `ExecuteAssembly` | 执行 .NET 程序集 | ✅ |
 | `SideloadReq` | `Sideload` | 侧载 DLL | ❌ |
 | `InvokeSpawnDllReq` | `SpawnDll` | 反射 DLL 注入 | ❌ |
 | `TaskReq` | `Task` | 注入 shellcode | ❌ |
@@ -204,6 +204,16 @@ uid 按 `NTAccount` 解析为 SID 后 `SetOwner`；gid 忽略。
 ChtimesReq: path string, atime int64(epoch 秒), mtime int64
 Chtimes:    path string
 ```
+
+**ExecuteAssemblyReq / ExecuteAssembly**
+```
+ExecuteAssemblyReq: assembly bytes(base64), arguments string[],
+                    className string, method string
+ExecuteAssembly:    output bytes(base64), response { err string }
+```
+- 无 `className`/`method` 时调用程序集入口点（`Main`）；
+- 指定 `className`+`method` 时调用该静态方法（支持 `()` / `(string[])` / `(string)` 签名）；
+- `output` 捕获 stdout+stderr；`response.err` 返回异常信息。
 
 **ExecuteReq / Execute**
 ```

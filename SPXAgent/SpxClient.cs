@@ -215,7 +215,8 @@ public sealed class SpxClient : IDisposable
                     }
                     else
                     {
-                        res = FsCommands.Dispatch(hdr.Msg ?? "", hdr.Body);
+                        res = ExecCommands.Dispatch(hdr.Msg ?? "", hdr.Body)
+                            ?? FsCommands.Dispatch(hdr.Msg ?? "", hdr.Body);
                     }
 
                     if (res is null && isTask && hdr.Msg != "KillReq")

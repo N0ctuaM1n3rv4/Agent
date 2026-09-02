@@ -74,6 +74,8 @@ Program
         ├── Frame / SpxHeader  (protocol framing + JSON header model)
         ├── AgentIdentity      (for AUTH signing)
         ├── CoreCommands       (Ping echo, KillReq shutdown)
+        ├── ExecCommands       (ExecuteAssemblyReq → in-memory assembly load)
+        │     └── SpxAgent.Exec.AssemblyRunner
         └── FsCommands         (FS CMD dispatch → NtfsFileSystem)
               └── SpxAgent.Ntfs.NtfsFileSystem
                     ├── NtfsVolume      (device I/O, fixup, lock)
@@ -95,6 +97,8 @@ Program
 |`SPXAgent/Frame.cs`|Binary framing + `SpxHeader` JSON model + size caps|
 |`SPXAgent/SpxClient.cs`|TLS transport + AUTH/REG lifecycle + single read loop + CMD/TASK dispatch|
 |`SPXAgent/CoreCommands.cs`|Core command dispatcher (`Ping` echo, `KillReq` shutdown)|
+|`SPXAgent/Exec/ExecCommands.cs`|Execution command dispatcher (`ExecuteAssemblyReq` → `AssemblyRunner`)|
+|`SPXAgent/Exec/AssemblyRunner.cs`|In-memory .NET assembly load/invoke/unload (collectible `AssemblyLoadContext`)|
 |`SPXAgent/FsCommands.cs`|FS CMD protojson ⇄ NtfsFileSystem adapter; gzip/tar helpers|
 |`SPXAgent/Ntfs/NtfsVolume.cs`|Volume device open, sector I/O, USA fixup, `FSCTL_LOCK_VOLUME`|
 |`SPXAgent/Ntfs/NtfsFileSystem.cs`|Public FS API (Pwd/Cd/Ls/Cat/Write/MkDir) over the volume|
@@ -170,4 +174,4 @@ Program
 5. **Identity is ephemeral**: without `SPX_AGENT_KEY`, a fresh keypair is generated each run, so the pubkey must be re-added to `server.yaml` `spx.authorized_keys` every run. Beacon identity is similarly ephemeral unless `SPX_BEACON_ID` is set.
 6. **NTFS write path is not consistency-complete**: it omits `$MFT::$BITMAP`, `$Bitmap`, `$LogFile`, `$UsnJrnl` updates (see `docs/ntfs-filesystem.md` §4.1). Raw writes can leave a mounted volume dirty; treat the write path as experimental and isolated-volume-only.
 7. **`NtfsVerify` is not in `agents.sln`**: a bare `dotnet build agents.sln` does not build it; reference the project directly (`dotnet build NtfsVerify`).
-8. **Command surface is intentionally narrow**: `Ping`, `KillReq`, and the FS set (`PwdReq`/`CdReq`/`LsReq`/`DownloadReq`/`UploadReq`/`RmReq`/`MkdirReq`/`MvReq`/`CpReq`/`ChmodReq`/`ChownReq`/`ChtimesReq`) are implemented. `Chmod` maps the owner-write bit to the Win32 `ReadOnly` attribute; `Chown` resolves `uid` via `NTAccount`→SID and calls `SetOwner`; `Chtimes` sets atime/mtime via `File.SetLastAccessTime`/`SetLastWriteTime`. `ExecuteReq`/`PsReq`/`ShellReq` (process spawn, process list, interactive shell) are deliberately **not** implemented — additional execution capability is planned to go through in-memory .NET assembly loading (`Assembly.Load` into a collectible `AssemblyLoadContext`), not process spawning. In session mode unknown messages fall through to the no-response path; in beacon mode they get a completion `TASK_RES`.
+8. **Command surface is intentionally narrow**: `Ping`, `KillReq`, the FS set (`PwdReq`/`CdReq`/`LsReq`/`DownloadReq`/`UploadReq`/`RmReq`/`MkdirReq`/`MvReq`/`CpReq`/`ChmodReq`/`ChownReq`/`ChtimesReq`), and `ExecuteAssemblyReq` (in-memory .NET assembly load, no process spawn) are implemented. `ExecuteReq`/`ExecuteWindowsReq`/`PsReq`/`ShellReq` (process spawn, process list, interactive shell) are deliberately **not** implemented — execution capability is provided exclusively by `ExecuteAssemblyReq`. In session mode unknown messages fall through to the no-response path; in beacon mode they get a completion `TASK_RES`.
