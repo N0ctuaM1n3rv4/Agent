@@ -78,27 +78,27 @@ server 回 `{t:"REG_OK", r, s:"<session-id>", c:0x0001}`。
 
 ## 7. PING / PONG
 
-agent 发 `{t:"PING", i, c:0x0002}` → server 回 `{t:"PONG", r:<i>}`。
+agent **不主动发** PING；服务器发 `{t:"PING", i, c:0x0002}` → agent 回 `{t:"PONG", r:<i>, c:0x0002}`。
 
 ## 8. CMD / RES(命令往返)
 
 - server → agent:`{t:"CMD", i, c:0x0100, msg:"<类型名>", body:{protojson}}`
 - agent → server:`{t:"RES", r:<CMD 的 i>, c:0x0101, msg:"<响应类型名>", body:{protojson}}`
 
-`msg` 注册表(server `spxMsgConstructors`):
+`msg` 注册表(server `spxMsgConstructors`)，**agent 已实现**的命令加 ✅，其余为 server 注册但 agent 有意不实现：
 
-| 请求 msg | 响应 msg | 命令 |
-|---|---|---|
-| `Ping` | `Ping` | 探活 |
-| `LsReq` | `Ls` | 列目录 |
-| `CdReq` | —(空) | 切换目录 |
-| `PwdReq` | `Pwd` | 当前路径 |
-| `DownloadReq` | `Download` | 下载文件 |
-| `UploadReq` | `Upload` | 上传文件 |
-| `ExecuteReq` | `Execute` | 执行程序 |
-| `PsReq` | `Ps` | 进程列表 |
-| `ShellReq` | —(走 OPEN/DATA) | 交互 shell |
-| `KillReq` | —(空) | 结束会话 |
+| 请求 msg | 响应 msg | 命令 | agent |
+|---|---|---|---|
+| `Ping` | `Ping` | 探活 | ✅ |
+| `LsReq` | `Ls` | 列目录 | ✅ |
+| `CdReq` | —(空) | 切换目录 | ✅ |
+| `PwdReq` | `Pwd` | 当前路径 | ✅ |
+| `DownloadReq` | `Download` | 下载文件 | ✅ |
+| `UploadReq` | `Upload` | 上传文件 | ✅ |
+| `ExecuteReq` | `Execute` | 执行程序 | ❌（走程序集 JIT 替代） |
+| `PsReq` | `Ps` | 进程列表 | ❌ |
+| `ShellReq` | —(走 OPEN/DATA) | 交互 shell | ❌ |
+| `KillReq` | —(空) | 结束会话 | ✅ |
 
 > 通用消息字段:`request { async timeout beaconId sessionId }` 内嵌于各请求,`response { err async }` 内嵌于各响应(protojson lowerCamelCase,可省略)。
 
@@ -157,6 +157,8 @@ Ps:    processes[ { pid,ppid,executable,owner,architecture,sessionId,cmdLine[] }
 
 - check-in:agent 发 `{t:"TASK", s:beaconID, c:0x0200}` → server 回一个或多个 `{t:"TASK", i, c:0x0200, msg, body}`
 - 结果回传:agent 发 `{t:"TASK_RES", r:<task 的 i>, s:beaconID, c:0x0201, msg, body}`
+- 无响应命令（如 `CdReq`）:agent 仍回 `{t:"TASK_RES", msg:"CdReq", body:{}}` 标记任务完成
+- 批次结束:server 不发终止帧，agent 用 5 秒无帧超时判断批次结束，然后断开连接睡眠
 
 ## 10. 流式通道(OPEN/DATA/CLOSE)
 
