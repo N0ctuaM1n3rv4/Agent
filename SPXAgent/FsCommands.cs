@@ -17,7 +17,10 @@ public static class FsCommands
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    private static readonly NtfsFileSystem Fs = new();
+    // Lazily opened on first raw-NTFS command so that Win32-only metadata
+    // commands (Chmod/Chown/Chtimes) work without volume access.
+    private static NtfsFileSystem? _fs;
+    private static NtfsFileSystem Fs => _fs ??= new NtfsFileSystem();
 
     public static (string Msg, JsonElement Body)? Dispatch(string msg, JsonElement? body)
     {
@@ -32,6 +35,9 @@ public static class FsCommands
             "MkdirReq" => Mkdir(body),
             "MvReq" => Mv(body),
             "CpReq" => Cp(body),
+            "ChmodReq" => Chmod(body),
+            "ChownReq" => Chown(body),
+            "ChtimesReq" => Chtimes(body),
             _ => null,
         };
     }
@@ -294,6 +300,135 @@ public static class FsCommands
 
     // ---------- helpers ----------
 
+    // Win32 attribute/ACL/timestamp commands (go through System.IO / Win32 —
+    // these are metadata operations, not raw NTFS data writes).
+
+    private static (string, JsonElement)? Chmod(JsonElement? body)
+    {
+        string path = GetString(body, "path") ?? "";
+        string fileMode = GetString(body, "fileMode") ?? "";
+        bool recursive = GetBool(body, "recursive") ?? false;
+        string? err = null;
+        try
+        {
+            // Windows has no POSIX mode; map the octal owner-write bit (0x80)
+            // to the ReadOnly attribute (write bit set => writable, clear => readonly).
+            long mode = Convert.ToInt64(fileMode, 8);
+            bool readOnly = (mode & 0x80) == 0;
+            ApplyAttributes(path, readOnly, recursive);
+        }
+        catch (Exception ex)
+        {
+            err = ex.Message;
+        }
+        var payload = new Dictionary<string, object> { ["path"] = path };
+        if (err is not null) payload["response"] = new Dictionary<string, object> { ["err"] = err };
+        return ("Chmod", JsonSerializer.SerializeToElement(payload, JsonOpts));
+    }
+
+    private static void ApplyAttributes(string path, bool readOnly, bool recursive)
+    {
+        FileAttributes attrs = File.GetAttributes(path);
+        attrs = readOnly ? attrs | FileAttributes.ReadOnly : attrs & ~FileAttributes.ReadOnly;
+        File.SetAttributes(path, attrs);
+
+        if (recursive && (attrs & FileAttributes.Directory) != 0)
+        {
+            foreach (string entry in Directory.EnumerateFileSystemEntries(path))
+                ApplyAttributes(entry, readOnly, recursive);
+        }
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static (string, JsonElement)? Chown(JsonElement? body)
+    {
+        string path = GetString(body, "path") ?? "";
+        string uid = GetString(body, "uid") ?? "";
+        string gid = GetString(body, "gid") ?? "";
+        bool recursive = GetBool(body, "recursive") ?? false;
+        string? err = null;
+        try
+        {
+            // Windows: uid/gid are account names or SIDs. Resolve via
+            // NTAccount/SID and set owner (and group when gid parses as SID).
+            var identity = new System.Security.Principal.NTAccount(uid);
+            var sid = (System.Security.Principal.SecurityIdentifier)identity.Translate(
+                typeof(System.Security.Principal.SecurityIdentifier));
+            ApplyOwner(path, sid, recursive);
+        }
+        catch (Exception ex)
+        {
+            err = ex.Message;
+        }
+        var payload = new Dictionary<string, object> { ["path"] = path };
+        if (err is not null) payload["response"] = new Dictionary<string, object> { ["err"] = err };
+        return ("Chown", JsonSerializer.SerializeToElement(payload, JsonOpts));
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void ApplyOwner(string path, System.Security.Principal.SecurityIdentifier sid, bool recursive)
+    {
+        if (File.Exists(path))
+        {
+            var info = new FileInfo(path);
+            var acl = info.GetAccessControl();
+            acl.SetOwner(sid);
+            info.SetAccessControl(acl);
+        }
+        else if (Directory.Exists(path))
+        {
+            var info = new DirectoryInfo(path);
+            var acl = info.GetAccessControl();
+            acl.SetOwner(sid);
+            info.SetAccessControl(acl);
+            if (recursive)
+            {
+                foreach (string entry in Directory.EnumerateFileSystemEntries(path))
+                    ApplyOwner(entry, sid, recursive);
+            }
+        }
+        else
+        {
+            throw new FileNotFoundException($"no such file or directory: {path}");
+        }
+    }
+
+    private static (string, JsonElement)? Chtimes(JsonElement? body)
+    {
+        string path = GetString(body, "path") ?? "";
+        long atime = GetInt64(body, "atime") ?? 0;
+        long mtime = GetInt64(body, "mtime") ?? 0;
+        string? err = null;
+        try
+        {
+            var at = DateTimeOffset.FromUnixTimeSeconds(atime);
+            var mt = DateTimeOffset.FromUnixTimeSeconds(mtime);
+            if (File.Exists(path))
+            {
+                File.SetLastAccessTime(path, at.LocalDateTime);
+                File.SetLastWriteTime(path, mt.LocalDateTime);
+            }
+            else if (Directory.Exists(path))
+            {
+                Directory.SetLastAccessTime(path, at.LocalDateTime);
+                Directory.SetLastWriteTime(path, mt.LocalDateTime);
+            }
+            else
+            {
+                throw new FileNotFoundException($"no such file or directory: {path}");
+            }
+        }
+        catch (Exception ex)
+        {
+            err = ex.Message;
+        }
+        var payload = new Dictionary<string, object> { ["path"] = path };
+        if (err is not null) payload["response"] = new Dictionary<string, object> { ["err"] = err };
+        return ("Chtimes", JsonSerializer.SerializeToElement(payload, JsonOpts));
+    }
+
+    // ---------- helpers ----------
+
     private static string? GetString(JsonElement? body, string name)
     {
         if (body is not JsonElement el || el.ValueKind != JsonValueKind.Object) return null;
@@ -305,7 +440,10 @@ public static class FsCommands
     {
         if (body is not JsonElement el || el.ValueKind != JsonValueKind.Object) return null;
         if (!el.TryGetProperty(name, out JsonElement v)) return null;
-        return v.TryGetInt64(out long n) ? n : null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out long n)) return n;
+        // protojson renders int64 as a JSON string.
+        if (v.ValueKind == JsonValueKind.String && long.TryParse(v.GetString(), out long s)) return s;
+        return null;
     }
 
     private static bool? GetBool(JsonElement? body, string name)

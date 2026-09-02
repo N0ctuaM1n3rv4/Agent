@@ -6,6 +6,9 @@ using SpxAgent.Ntfs;
 
 static string Sha256Hex(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 
+if (args.Contains("--smoke-meta"))
+    return MetaCmdSmoke.Run();
+
 const int exitOk = 0;
 const int exitAssertion = 1;
 const int exitChkdsk = 2;

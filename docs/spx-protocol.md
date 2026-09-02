@@ -99,9 +99,9 @@ agent **不主动发** PING；服务器发 `{t:"PING", i, c:0x0002}` → agent �
 | `MkdirReq` | `Mkdir` | 创建目录 | ✅ |
 | `MvReq` | `Mv` | 移动/重命名 | ✅ |
 | `CpReq` | `Cp` | 复制文件 | ✅ |
-| `ChmodReq` | `Chmod` | 修改权限 | ❌ |
-| `ChownReq` | `Chown` | 修改属主 | ❌ |
-| `ChtimesReq` | `Chtimes` | 修改时间戳 | ❌ |
+| `ChmodReq` | `Chmod` | 修改权限 | ✅（Win32 属性映射，非 POSIX） |
+| `ChownReq` | `Chown` | 修改属主 | ✅（NTAccount→SID→SetOwner） |
+| `ChtimesReq` | `Chtimes` | 修改时间戳 | ✅ |
 | `MountReq` | `Mount` | 挂载信息 | ❌ |
 | `PsReq` | `Ps` | 进程列表 | ❌ |
 | `TerminateReq` | `Terminate` | 结束进程 | ❌ |
@@ -183,6 +183,26 @@ Download:  path string, encoder string, exists bool, start int64, stop int64,
 UploadReq: path string, encoder string, data bytes(base64), isIoc bool,
            fileName string, isDirectory bool, overwrite bool
 Upload:    path string, writtenFiles int32, unwriteableFiles int32
+```
+
+**ChmodReq / Chmod**
+```
+ChmodReq: path string, fileMode string(八进制，如 "0644"), recursive bool
+Chmod:    path string
+```
+Windows 无 POSIX mode；agent 将 owner-write 位映射到 ReadOnly 属性。
+
+**ChownReq / Chown**
+```
+ChownReq: path string, uid string(Windows 账户名或 SID), gid string, recursive bool
+Chown:    path string
+```
+uid 按 `NTAccount` 解析为 SID 后 `SetOwner`；gid 忽略。
+
+**ChtimesReq / Chtimes**
+```
+ChtimesReq: path string, atime int64(epoch 秒), mtime int64
+Chtimes:    path string
 ```
 
 **ExecuteReq / Execute**
