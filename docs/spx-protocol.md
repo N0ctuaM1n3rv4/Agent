@@ -102,50 +102,21 @@ agent **不主动发** PING；服务器发 `{t:"PING", i, c:0x0002}` → agent �
 | `ChmodReq` | `Chmod` | 修改权限 | ✅（Win32 属性映射，非 POSIX） |
 | `ChownReq` | `Chown` | 修改属主 | ✅（NTAccount→SID→SetOwner） |
 | `ChtimesReq` | `Chtimes` | 修改时间戳 | ✅ |
-| `MountReq` | `Mount` | 挂载信息 | ❌ |
 | `PsReq` | `Ps` | 进程列表 | ❌ |
 | `TerminateReq` | `Terminate` | 结束进程 | ❌ |
-| `ProcessDumpReq` | `ProcessDump` | 进程转储 | ❌ |
-| `ExecuteReq` | `Execute` | 执行程序 | ❌（走程序集 JIT 替代） |
-| `ExecuteWindowsReq` | `Execute` | Windows 执行 | ❌ |
 | `ExecuteAssemblyReq` | `ExecuteAssembly` | 执行 .NET 程序集 | ✅ |
-| `SideloadReq` | `Sideload` | 侧载 DLL | ❌ |
-| `InvokeSpawnDllReq` | `SpawnDll` | 反射 DLL 注入 | ❌ |
-| `TaskReq` | `Task` | 注入 shellcode | ❌ |
+| `ShellcodeReq` | `Shellcode` |  shellcode | ❌ |
 | `IfconfigReq` | `Ifconfig` | 网卡信息 | ❌ |
 | `NetstatReq` | `Netstat` | 网络连接 | ❌ |
 | `EnvReq` | `EnvInfo` | 环境变量 | ❌ |
 | `SetEnvReq` | `SetEnv` | 设置环境变量 | ❌ |
 | `UnsetEnvReq` | `UnsetEnv` | 删除环境变量 | ❌ |
 | `ScreenshotReq` | `Screenshot` | 截图 | ❌ |
-| `GetPrivsReq` | `GetPrivs` | 权限列表 | ❌ |
-| `ServicesReq` | `Services` | 服务列表 | ❌ |
-| `ServiceDetailReq` | `ServiceDetail` | 服务详情 | ❌ |
-| `StartServiceByNameReq` | `ServiceInfo` | 启动服务 | ❌ |
-| `StopServiceReq` | `ServiceInfo` | 停止服务 | ❌ |
-| `RemoveServiceReq` | `ServiceInfo` | 删除服务 | ❌ |
-| `RunAsReq` | `RunAs` | 以用户运行 | ❌ |
-| `ImpersonateReq` | `Impersonate` | 模拟用户 | ❌ |
-| `RevToSelfReq` | `RevToSelf` | 还原 token | ❌ |
-| `GetSystemReq` | `GetSystem` | 提权 SYSTEM | ❌ |
-| `MakeTokenReq` | `MakeToken` | 创建 token | ❌ |
-| `CurrentTokenOwnerReq` | `CurrentTokenOwner` | 查询 token 属主 | ❌ |
-| `RegistryReadReq` | `RegistryRead` | 读注册表 | ❌ |
-| `RegistryWriteReq` | `RegistryWrite` | 写注册表 | ❌ |
-| `RegistryCreateKeyReq` | `RegistryCreateKey` | 创建注册表键 | ❌ |
-| `RegistryDeleteKeyReq` | `RegistryDeleteKey` | 删除注册表键 | ❌ |
-| `RegistrySubKeyListReq` | `RegistrySubKeyList` | 列子键 | ❌ |
-| `RegistryListValuesReq` | `RegistryValuesList` | 列值 | ❌ |
-| `RegistryReadHiveReq` | `RegistryReadHive` | 读注册表 hive | ❌ |
-| `ReconfigureReq` | `Reconfigure` | 重连配置 | ❌ |
 | `SSHCommandReq` | `SSHCommand` | SSH 命令 | ❌ |
 | `OpenSession` | `OpenSession` | 打开会话 | ❌ |
 | `CloseSessionReq` | —(空) | 关闭会话 | ❌ |
 | `ShellReq` | —(走 OPEN/DATA) | 交互 shell | ❌ |
 | `KillReq` | —(空) | 结束会话 | ✅ |
-| `ListExtensionsReq` | `ListExtensions` | 扩展列表 | ❌ |
-| `CallExtensionReq` | `CallExtension` | 调用扩展 | ❌ |
-| `RegisterExtensionReq` | `RegisterExtension` | 注册扩展 | ❌ |
 
 > 通用消息字段:`request { async timeout beaconId sessionId }` 内嵌于各请求,`response { err async }` 内嵌于各响应(protojson lowerCamelCase,可省略)。
 
